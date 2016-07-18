@@ -216,9 +216,9 @@ func main() {
 		perspective := mgl.Perspective(mgl.DegToRad(60.0), float32(windowWidth)/float32(windowHeight), 0.1, 50.0)
 		view := camera.GetViewMatrix()
 
-		renderer.DrawRenderable(smoke, nil, perspective, view, camera)
 		renderer.DrawRenderable(testCube, nil, perspective, view, camera)
 		renderer.DrawRenderable(floorPlane, nil, perspective, view, camera)
+		renderer.DrawRenderable(smoke, nil, perspective, view, camera)
 
 		// draw the screen
 		mainWindow.SwapBuffers()
