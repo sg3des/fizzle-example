@@ -1,0 +1,573 @@
+// Copyright 2016, Timothy Bogdala <tdb@animal-machine.com>
+// See the LICENSE file for more details.
+
+package main
+
+import (
+	"flag"
+	"fmt"
+	"os"
+	"runtime"
+	"time"
+
+	glfw "github.com/go-gl/glfw/v3.1/glfw"
+	mgl "github.com/go-gl/mathgl/mgl32"
+	gui "github.com/tbogdala/eweygewey"
+	guiinput "github.com/tbogdala/eweygewey/glfwinput"
+
+	fizzle "github.com/tbogdala/fizzle"
+	graphics "github.com/tbogdala/fizzle/graphicsprovider"
+	opengl "github.com/tbogdala/fizzle/graphicsprovider/opengl"
+	particles "github.com/tbogdala/fizzle/particles"
+	forward "github.com/tbogdala/fizzle/renderer/forward"
+)
+
+var (
+	windowWidth       = 1280
+	windowHeight      = 720
+	mainWindow        *glfw.Window
+	uiman             *gui.Manager
+	billboardFilepath = "assets/textures/explosion00.png"
+	colorShader       = "assets/forwardshaders/color"
+)
+
+const (
+	fontScale    = 18
+	fontFilepath = "assets/Oswald-Heavy.ttf"
+	//fontFilepath = "../../examples/assets/HammersmithOne.ttf"
+	fontGlyphs = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890., :[]{}\\|<>;\"'~`?/-+_=()*&^%$#@!"
+
+	diffuseTexBumpedShaderPath = "./assets/forwardshaders/diffuse_texbumped_shadows"
+	shadowmapTextureShaderPath = "./assets/forwardshaders/shadowmap_texture"
+	shadowmapShaderPath        = "./assets/forwardshaders/shadowmap_generator"
+
+	explosionPath   = "./assets/textures/explosion00.png"
+	testDiffusePath = "./assets/textures/TestCube_D.png"
+	testNormalsPath = "./assets/textures/TestCube_N.png"
+)
+
+// block of flags set on the command line
+var (
+	flagDesktopNumber int
+)
+
+// spawnerPrototypes keeps track of possible spawner interface implementations
+// to switch between
+type spawnerPrototypes struct {
+	Name string
+	particles.ParticleSpawner
+	RenderUI func(wnd *gui.Window)
+}
+
+var (
+	// created instances of particle spawners
+	knownSpawners []spawnerPrototypes
+)
+
+// GLFW event handling must run on the main OS thread. If this doesn't get
+// locked down, you will likely see random crashes on memory access while
+// running the application after a few seconds.
+//
+// So on initialization of the module, lock the OS thread for this goroutine.
+func init() {
+	runtime.LockOSThread()
+	flag.IntVar(&flagDesktopNumber, "desktop", -1, "the index of the desktop to create the main window on")
+}
+
+// initSpawners create prototype instances of all known spawner types
+func initSpawners() {
+	knownSpawners = []spawnerPrototypes{}
+
+	cone := particles.NewConeSpawner(nil, 0.5, 1, 1)
+	knownSpawners = append(knownSpawners, spawnerPrototypes{Name: cone.GetName(), ParticleSpawner: cone, RenderUI: func(wnd *gui.Window) {
+		const textWidth = 0.33
+		wnd.RequestItemWidthMin(textWidth)
+		wnd.Text("Top Radius")
+		wnd.DragSliderUFloat("tradius", 0.1, &cone.TopRadius)
+
+		wnd.StartRow()
+		wnd.RequestItemWidthMin(textWidth)
+		wnd.Text("Bottom Radius")
+		wnd.DragSliderUFloat("bradius", 0.1, &cone.BottomRadius)
+
+		wnd.StartRow()
+		wnd.RequestItemWidthMin(textWidth)
+		wnd.Text("Length")
+		wnd.DragSliderUFloat("conelength", 0.1, &cone.Length)
+	}})
+
+	cube := particles.NewCubeSpawner(nil, mgl.Vec3{-1, -1, -1}, mgl.Vec3{1, 1, 1})
+	knownSpawners = append(knownSpawners, spawnerPrototypes{Name: cube.GetName(), ParticleSpawner: cube, RenderUI: func(wnd *gui.Window) {
+		const textWidth = 0.33
+		const width3Col = 0.22
+
+		wnd.RequestItemWidthMin(textWidth)
+		wnd.Text("Bottom Left")
+		wnd.RequestItemWidthMax(width3Col)
+		wnd.DragSliderFloat("cubebl1", 0.1, &cube.BottomLeft[0])
+		wnd.RequestItemWidthMax(width3Col)
+		wnd.DragSliderFloat("cubebl2", 0.1, &cube.BottomLeft[1])
+		wnd.RequestItemWidthMax(width3Col)
+		wnd.DragSliderFloat("cubebl3", 0.1, &cube.BottomLeft[2])
+
+		wnd.StartRow()
+		wnd.RequestItemWidthMin(textWidth)
+		wnd.Text("Top Right")
+		wnd.RequestItemWidthMax(width3Col)
+		wnd.DragSliderFloat("cubetr1", 0.1, &cube.TopRight[0])
+		wnd.RequestItemWidthMax(width3Col)
+		wnd.DragSliderFloat("cubetr2", 0.1, &cube.TopRight[1])
+		wnd.RequestItemWidthMax(width3Col)
+		wnd.DragSliderFloat("cubetr3", 0.1, &cube.TopRight[2])
+	}})
+}
+
+// getSpawnerIndex returns the slice index within known spawners for a given spawner interface instance
+func getSpawnerIndex(spawner particles.ParticleSpawner) int {
+	for i, s := range knownSpawners {
+		if s.Name == spawner.GetName() {
+			return i
+		}
+	}
+
+	return 0
+}
+
+func main() {
+	// parse the command line options
+	flag.Parse()
+
+	// start off by initializing the GL and GLFW libraries and creating a window.
+	w, gfx := initGraphics("Particle Editor", windowWidth, windowHeight)
+	mainWindow = w
+
+	// create prototype instances of all known spawner types
+	initSpawners()
+
+	/////////////////////////////////////////////////////////////////////////////
+	// create and initialize the gui Manager
+	uiman = gui.NewManager(gfx)
+	err := uiman.Initialize(gui.VertShader330, gui.FragShader330, int32(windowWidth), int32(windowHeight), int32(windowHeight))
+	if err != nil {
+		panic("Failed to initialize the user interface! " + err.Error())
+	}
+	guiinput.SetInputHandlers(uiman, mainWindow)
+
+	// load a font
+	_, err = uiman.NewFont("Default", fontFilepath, fontScale, fontGlyphs)
+	if err != nil {
+		panic("Failed to load the font file! " + err.Error())
+	}
+
+	/////////////////////////////////////////////////////////////////////////////
+	// make a window that will render the particle system
+	const particleWindowSize = 512
+	customMargin := mgl.Vec4{0, 0, 0, 0}
+	customWindowWS, customWindowHS := uiman.DisplayToScreen(particleWindowSize+8, particleWindowSize+8) // offset by 8 for windowPadding
+	customWS, customHS := uiman.DisplayToScreen(particleWindowSize, particleWindowSize)
+
+	renderer := forward.NewForwardRenderer(gfx)
+	renderer.ChangeResolution(particleWindowSize, particleWindowSize)
+	defer renderer.Destroy()
+
+	// load the diffuse shader
+	particleShader, err := fizzle.LoadShaderProgram(particles.VertShader330, particles.FragShader330, nil)
+	if err != nil {
+		panic("Failed to compile and link the particle shader program! " + err.Error())
+	}
+	defer particleShader.Destroy()
+
+	// load the color shader
+	colorShader, err := fizzle.LoadShaderProgramFromFiles(colorShader, nil)
+	if err != nil {
+		panic("Failed to compile and link the color shader program! " + err.Error())
+	}
+	defer colorShader.Destroy()
+
+	////////////////////////////////////////////////////////////////////////////////////////
+	//
+	//   initObjects
+	//
+	//
+	//
+	// load the diffuse, textured and normal mapped shader
+	diffuseTexBumpedShader, err := fizzle.LoadShaderProgramFromFiles(diffuseTexBumpedShaderPath, nil)
+	if err != nil {
+		fmt.Printf("Failed to compile and link the diffuse shader program!\n%v", err)
+		os.Exit(1)
+	}
+	defer diffuseTexBumpedShader.Destroy()
+
+	// load the diffuse, textured and normal mapped shader
+	shadowmapTextureShader, err := fizzle.LoadShaderProgramFromFiles(shadowmapTextureShaderPath, nil)
+	if err != nil {
+		fmt.Printf("Failed to compile and link the color texture shader program!\n%v", err)
+		os.Exit(1)
+	}
+	defer shadowmapTextureShader.Destroy()
+
+	// loadup the shadowmap shaders
+	shadowmapShader, err := fizzle.LoadShaderProgramFromFiles(shadowmapShaderPath, nil)
+	if err != nil {
+		fmt.Printf("Failed to compile and link the shadowmap generator shader program!\n%v", err)
+		os.Exit(1)
+	}
+	defer shadowmapShader.Destroy()
+
+	// load up some textures
+	textureMan := fizzle.NewTextureManager()
+
+	// explosionTex, err := textureMan.LoadTexture("explosion", explosionPath)
+	// if err != nil {
+	// 	fmt.Printf("Failed to load the diffuse texture at %s!\n%v", explosionPath, err)
+	// 	os.Exit(1)
+	// }
+
+	diffuseTex, err := textureMan.LoadTexture("cube_diffuse", testDiffusePath)
+	if err != nil {
+		fmt.Printf("Failed to load the diffuse texture at %s!\n%v", testDiffusePath, err)
+		os.Exit(1)
+	}
+
+	normalsTex, err := textureMan.LoadTexture("cube_diffuse", testNormalsPath)
+	if err != nil {
+		fmt.Printf("Failed to load the normals texture at %s!\n%v", testNormalsPath, err)
+		os.Exit(1)
+	}
+
+	// create the floor plane
+	floorPlane := fizzle.CreatePlaneXZ("diffuse_texbumped", -0.5, 0.5, 0.5, -0.5)
+	floorPlane.Scale = mgl.Vec3{10, 10, 10}
+	floorPlane.Core.DiffuseColor = mgl.Vec4{1.0, 1.0, 1.0, 0.1}
+	floorPlane.Core.SpecularColor = mgl.Vec4{0.3, 0.3, 0.3, 1.0}
+	floorPlane.Core.Shininess = 3.0
+	floorPlane.Core.Tex0 = diffuseTex
+	floorPlane.Core.Tex1 = normalsTex
+	floorPlane.Core.Shader = diffuseTexBumpedShader
+	floorPlane.Location = mgl.Vec3{0, -1, 0}
+
+	testCube := fizzle.CreateCube("diffuse_texbumped", -0.5, -0.5, -0.5, 0.5, 0.5, 0.5)
+	testCube.Core.DiffuseColor = mgl.Vec4{1.0, 1.0, 1.0, 1.0}
+	testCube.Core.SpecularColor = mgl.Vec4{0.3, 0.3, 0.3, 1.0}
+	testCube.Location = mgl.Vec3{0, 0, 0.0}
+	testCube.Core.Shininess = 6.0
+	testCube.Core.Tex0 = diffuseTex
+	testCube.Core.Tex1 = normalsTex
+	testCube.Core.Shader = diffuseTexBumpedShader
+
+	// enable shadow mapping in the renderer
+	renderer.SetupShadowMapRendering()
+
+	// add light #1
+	light := renderer.NewLight()
+	light.Position = mgl.Vec3{5.0, 3.0, 5.0}
+	light.DiffuseColor = mgl.Vec4{0.9, 0.9, 0.9, 1.0}
+	light.DiffuseIntensity = 30
+	light.AmbientIntensity = 0.50
+	light.Attenuation = 0.2
+	renderer.ActiveLights[0] = light
+	light.CreateShadowMap(4096, 0.5, 50.0, mgl.Vec3{-5.0, -3.0, -5.0})
+	//
+	//
+	//////////////////////////////////////////////////////////////////////////////////////////
+
+	// create a particle system
+	particleSystem := particles.NewSystem(gfx)
+	emitter := particleSystem.NewEmitter(nil)
+	emitter.Properties.BillboardFilepath = billboardFilepath
+	emitter.Properties.MaxParticles = 300
+	emitter.Properties.SpawnRate = 40
+	emitter.Properties.Size = 32.0
+	emitter.Properties.Color = mgl.Vec4{0.0, 0.9, 0.0, 1.0}
+	emitter.Properties.Velocity = mgl.Vec3{0, 1, 0}
+	emitter.Properties.Acceleration = mgl.Vec3{0, -0.1, 0}
+	emitter.Properties.TTL = 3.0
+	emitter.Shader = particleShader.Prog
+
+	// load the billboard
+	err = emitter.LoadBillboard()
+	if err != nil {
+		panic(err.Error())
+	}
+
+	// reset the spawner to the first known spawner instance
+	emitter.Spawner = knownSpawners[0]
+	emitter.Spawner.SetOwner(emitter)
+
+	// setup the camera to look at the cube
+	// camera := fizzle.NewOrbitCamera(mgl.Vec3{0, 0, 0}, math.Pi/2.0, 5.0, math.Pi/2.0)
+	camera := fizzle.NewYawPitchCamera(mgl.Vec3{2, 6, 5})
+	// camera.LookAtDirect(mgl.Vec3{0, 0, 0})
+	camera.SetYawAndPitch(0.0, mgl.DegToRad(60))
+
+	// now create the window itself
+	customWindow := uiman.NewWindow("Particle Output", 0.01, 0.99, customWindowWS, customWindowHS, func(wnd *gui.Window) {
+		wnd.Custom(customWS, customHS, customMargin, func() {
+			// rotate the cube and sphere around the Y axis at a speed of radsPerSec
+			gfx.ClearColor(0.0, 0.0, 0.0, 1.0)
+			gfx.Clear(graphics.COLOR_BUFFER_BIT | graphics.DEPTH_BUFFER_BIT)
+
+			perspective := mgl.Perspective(mgl.DegToRad(60.0), float32(particleWindowSize)/float32(particleWindowSize), 0.1, 50.0)
+			view := camera.GetViewMatrix()
+			particleSystem.Draw(perspective, view)
+
+			// draw the emitter volumes
+			for _, e := range particleSystem.Emitters {
+				e.Spawner.CreateRenderable()
+				e.Spawner.DrawSpawnVolume(renderer, colorShader, perspective, view, camera)
+			}
+
+		})
+	})
+	customWindow.Title = "Particle Output"
+	customWindow.ShowTitleBar = true
+	customWindow.Style.WindowPadding = mgl.Vec4{4, 4, 4, 4}
+
+	// create a window for editing the emitter properites
+	var yaw, pitch, roll int
+	propertyWindow := uiman.NewWindow("Emitter", 0.5, 0.99, 0.5, 0.75, func(wnd *gui.Window) {
+		const textWidth = 0.33
+		const width4Col = 0.165
+		const width3Col = 0.22
+		props := &emitter.Properties
+
+		wnd.StartRow()
+		wnd.Checkbox("isAlive", &emitter.Owner.IsActive)
+		wnd.Text("Is Alive")
+		wnd.Space(0.05)
+		wnd.Checkbox("isEmitting", &emitter.Owner.IsEmitting)
+		wnd.Text("Is Emitting")
+
+		// setup the controls to switch between spawnwers
+		wnd.Separator()
+		prevPressed, _ := wnd.Button("prevSpawner", " < ")
+		nextPressed, _ := wnd.Button("nextSpawner", " > ")
+		ki := getSpawnerIndex(emitter.Spawner)
+		if prevPressed {
+			if ki > 0 {
+				emitter.Spawner = knownSpawners[ki-1].ParticleSpawner
+				emitter.Spawner.SetOwner(emitter)
+				ki--
+			}
+		}
+		if nextPressed {
+			if ki < len(knownSpawners)-1 {
+				emitter.Spawner = knownSpawners[ki+1].ParticleSpawner
+				emitter.Spawner.SetOwner(emitter)
+				ki++
+			}
+		}
+		wnd.Text(emitter.Spawner.GetName())
+
+		// render the spawner interface
+		wnd.StartRow()
+		knownSpawners[ki].RenderUI(wnd)
+
+		wnd.Separator()
+		wnd.RequestItemWidthMin(textWidth)
+		loadBillboardPressed, _ := wnd.Button("LoadBillboard", "Load Billboard")
+		wnd.Editbox("billboardedit", &props.BillboardFilepath)
+		if loadBillboardPressed {
+			err := emitter.LoadBillboard()
+			if err != nil {
+				fmt.Printf("Failed to load new billobard: %v\n", err)
+			}
+		}
+
+		wnd.StartRow()
+		wnd.RequestItemWidthMin(textWidth)
+		wnd.Text("Max Particles")
+		wnd.DragSliderUInt("maxparticles", 0.5, &props.MaxParticles)
+
+		wnd.StartRow()
+		wnd.RequestItemWidthMin(textWidth)
+		wnd.Text("Spawn Rate")
+		wnd.DragSliderUInt("spawnrate", 0.5, &props.SpawnRate)
+
+		wnd.StartRow()
+		wnd.RequestItemWidthMin(textWidth)
+		wnd.Text("TTL")
+		wnd.DragSliderUFloat64("ttl", 0.1, &props.TTL)
+
+		wnd.StartRow()
+		wnd.RequestItemWidthMin(textWidth)
+		wnd.Text("Size")
+		wnd.DragSliderUFloat("size", 0.1, &props.Size)
+
+		wnd.StartRow()
+		wnd.RequestItemWidthMin(textWidth)
+		wnd.Text("Speed")
+		wnd.DragSliderUFloat("speed", 0.1, &props.Speed)
+
+		wnd.StartRow()
+		wnd.RequestItemWidthMin(textWidth)
+		wnd.Text("Color")
+		wnd.RequestItemWidthMax(width4Col)
+		wnd.SliderFloat("color1", &props.Color[0], 0.0, 1.0)
+		wnd.RequestItemWidthMax(width4Col)
+		wnd.SliderFloat("color2", &props.Color[1], 0.0, 1.0)
+		wnd.RequestItemWidthMax(width4Col)
+		wnd.SliderFloat("color3", &props.Color[2], 0.0, 1.0)
+		wnd.RequestItemWidthMax(width4Col)
+		wnd.SliderFloat("color4", &props.Color[3], 0.0, 1.0)
+
+		wnd.StartRow()
+		wnd.RequestItemWidthMin(textWidth)
+		wnd.Text("Origin")
+		wnd.RequestItemWidthMax(width3Col)
+		wnd.DragSliderFloat("origin1", 0.1, &props.Origin[0])
+		wnd.RequestItemWidthMax(width3Col)
+		wnd.DragSliderFloat("origin2", 0.1, &props.Origin[1])
+		wnd.RequestItemWidthMax(width3Col)
+		wnd.DragSliderFloat("origin3", 0.1, &props.Origin[2])
+
+		wnd.StartRow()
+		wnd.RequestItemWidthMin(textWidth)
+		wnd.Text("YawPitchRoll") // Y, X, Z order
+		wnd.RequestItemWidthMax(width3Col)
+		wnd.SliderInt("yaw", &yaw, 0, 359)
+		wnd.RequestItemWidthMax(width3Col)
+		wnd.SliderInt("pitch", &pitch, 0, 359)
+		wnd.RequestItemWidthMax(width3Col)
+		wnd.SliderInt("roll", &roll, 0, 359)
+
+		// set the rotation based on the UI selected ypr angle values (in degrees)
+		props.Rotation = mgl.AnglesToQuat(mgl.DegToRad(float32(pitch)), mgl.DegToRad(float32(yaw)), mgl.DegToRad(float32(roll)), mgl.XYZ)
+	})
+	propertyWindow.Title = "Emitter Properties"
+	propertyWindow.ShowTitleBar = true
+	propertyWindow.IsMoveable = true
+	propertyWindow.AutoAdjustHeight = true
+	//propertyWindow.ShowScrollBar = true
+	//propertyWindow.IsScrollable = true
+
+	/////////////////////////////////////////////////////////////////////////////
+	// loop until something told the mainWindow that it should close
+	// set some OpenGL flags
+	gfx.Enable(graphics.CULL_FACE)
+	gfx.Enable(graphics.DEPTH_TEST)
+	gfx.Enable(graphics.PROGRAM_POINT_SIZE)
+	gfx.Enable(graphics.BLEND)
+	gfx.BlendFunc(graphics.SRC_ALPHA, graphics.ONE_MINUS_SRC_ALPHA)
+
+	lastFrame := time.Now()
+	for !mainWindow.ShouldClose() {
+		// calculate the difference in time to control rotation speed
+		thisFrame := time.Now()
+		frameDelta := thisFrame.Sub(lastFrame).Seconds()
+
+		// update the data for the application
+		particleSystem.Update(frameDelta)
+
+		// Shadow time!
+		renderer.StartShadowMapping()
+		lightCount := renderer.GetActiveLightCount()
+		if lightCount >= 1 {
+			for lightI := 0; lightI < lightCount; lightI++ {
+				// get lights with shadow maps
+				lightToCast := renderer.ActiveLights[lightI]
+				if lightToCast.ShadowMap == nil {
+					continue
+				}
+
+				// enable the light to cast shadows
+				renderer.EnableShadowMappingLight(lightToCast)
+				renderer.DrawRenderableWithShader(testCube, shadowmapShader, nil, lightToCast.ShadowMap.Projection, lightToCast.ShadowMap.View, camera)
+				renderer.DrawRenderableWithShader(floorPlane, shadowmapShader, nil, lightToCast.ShadowMap.Projection, lightToCast.ShadowMap.View, camera)
+
+			}
+		}
+		renderer.EndShadowMapping()
+
+		// clear the screen
+		//width, height := renderer.GetResolution()
+		gfx.Viewport(0, 0, int32(windowWidth), int32(windowHeight))
+		// clearColor := gui.ColorIToV(114, 144, 154, 255)
+		// gfx.ClearColor(clearColor[0], clearColor[1], clearColor[2], clearColor[3])
+		gfx.ClearColor(0.05, 0.05, 0.05, 1.0)
+		gfx.Clear(graphics.COLOR_BUFFER_BIT | graphics.DEPTH_BUFFER_BIT)
+
+		// make the projection and view matrixes
+		perspective := mgl.Perspective(mgl.DegToRad(60.0), float32(windowWidth)/float32(windowHeight), 0.1, 50.0)
+		view := camera.GetViewMatrix()
+
+		// draw the stuff
+		renderer.DrawRenderable(testCube, nil, perspective, view, camera)
+		renderer.DrawRenderable(floorPlane, nil, perspective, view, camera)
+
+		// draw the user interface
+		gfx.Disable(graphics.DEPTH_TEST)
+		gfx.Enable(graphics.SCISSOR_TEST)
+		uiman.Construct(frameDelta)
+		uiman.Draw()
+		gfx.Disable(graphics.SCISSOR_TEST)
+		gfx.Enable(graphics.DEPTH_TEST)
+
+		gfx.BindTexture(graphics.TEXTURE_2D, renderer.ActiveLights[0].ShadowMap.Texture)
+		gfx.TexParameteri(graphics.TEXTURE_2D, graphics.TEXTURE_COMPARE_MODE, graphics.COMPARE_REF_TO_TEXTURE)
+		gfx.BindTexture(graphics.TEXTURE_2D, 0)
+
+		// draw the screen
+		mainWindow.SwapBuffers()
+
+		// advise GLFW to poll for input. without this the window appears to hang.
+		glfw.PollEvents()
+
+		// update our last frame time
+		lastFrame = thisFrame
+	}
+}
+
+// initGraphics creates an OpenGL window and initializes the required graphics libraries.
+// It will either succeed or panic.
+func initGraphics(title string, w int, h int) (*glfw.Window, graphics.GraphicsProvider) {
+	// GLFW must be initialized before it's called
+	err := glfw.Init()
+	if err != nil {
+		panic("Can't init glfw! " + err.Error())
+	}
+
+	// request a OpenGL 3.3 core context
+	glfw.WindowHint(glfw.Samples, 0)
+	glfw.WindowHint(glfw.ContextVersionMajor, 3)
+	glfw.WindowHint(glfw.ContextVersionMinor, 3)
+	glfw.WindowHint(glfw.OpenGLForwardCompatible, glfw.True)
+	glfw.WindowHint(glfw.OpenGLProfile, glfw.OpenGLCoreProfile)
+
+	// get a list of all the monitors to use and then take the one
+	// specified by the command line flag
+	monitors := glfw.GetMonitors()
+	if flagDesktopNumber >= len(monitors) {
+		flagDesktopNumber = -1
+	}
+	var monitorToUse *glfw.Monitor
+	if flagDesktopNumber >= 0 {
+		monitorToUse = monitors[flagDesktopNumber]
+	}
+
+	// do the actual window creation
+	mainWindow, err = glfw.CreateWindow(w, h, title, monitorToUse, nil)
+	if err != nil {
+		panic("Failed to create the main window! " + err.Error())
+	}
+	mainWindow.SetSizeCallback(onWindowResize)
+	mainWindow.MakeContextCurrent()
+
+	// disable v-sync for max draw rate
+	glfw.SwapInterval(0)
+
+	// initialize OpenGL
+	gfx, err := opengl.InitOpenGL()
+	if err != nil {
+		panic("Failed to initialize OpenGL! " + err.Error())
+	}
+	fizzle.SetGraphics(gfx)
+
+	return mainWindow, gfx
+}
+
+// onWindowResize is called when the window changes size
+func onWindowResize(w *glfw.Window, width int, height int) {
+	uiman.AdviseResolution(int32(width), int32(height))
+	//renderer.ChangeResolution(int32(width), int32(height))
+}
