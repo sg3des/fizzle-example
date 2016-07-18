@@ -121,7 +121,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	var objects = make(map[*fizzle.Renderable]bool)
+	// var objects = make(map[*fizzle.Renderable]bool)
 
 	smoke := fizzle.CreatePlaneXY("diffuse_texbumped", -0.5, 0.5, 0.5, -0.5)
 	smoke.Scale = mgl.Vec3{10, 10, 10}
@@ -130,7 +130,7 @@ func main() {
 	smoke.Core.Tex0 = explosionTex
 	smoke.Core.Shader = blendShader
 	smoke.Location = mgl.Vec3{0, 0, 0}
-	objects[smoke] = true
+	// objects[smoke] = true
 
 	floorPlane := fizzle.CreatePlaneXY("diffuse_texbumped", -0.5, 0.5, 0.5, -0.5)
 	floorPlane.Scale = mgl.Vec3{10, 10, 10}
@@ -141,7 +141,7 @@ func main() {
 	floorPlane.Core.Tex1 = normalsTex
 	floorPlane.Core.Shader = diffuseTexBumpedShader
 	floorPlane.Location = mgl.Vec3{0, 0, -2}
-	objects[floorPlane] = true
+	// objects[floorPlane] = true
 
 	testCube := fizzle.CreateCube("diffuse_texbumped", -0.5, -0.5, -0.5, 0.5, 0.5, 0.5)
 	testCube.Core.DiffuseColor = mgl.Vec4{1.0, 1.0, 1.0, 1.0}
@@ -150,7 +150,7 @@ func main() {
 	testCube.Core.Tex0 = diffuseTex
 	testCube.Core.Tex1 = normalsTex
 	testCube.Core.Shader = diffuseTexBumpedShader
-	objects[testCube] = true
+	// objects[testCube] = true
 
 	// enable shadow mapping in the renderer
 	renderer.SetupShadowMapRendering()
